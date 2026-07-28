@@ -50,6 +50,12 @@ asset-squeeze optimize
 
 `--dry-run` previews changes without writing files. The real optimize command replaces files in place only when the optimized file is smaller.
 
+To update later:
+
+```bash
+asset-squeeze update
+```
+
 ## Commands
 
 ### Check The Project
@@ -93,6 +99,7 @@ asset-squeeze optimize
 asset-squeeze optimize --format png
 asset-squeeze optimize --format jpeg
 asset-squeeze optimize --format svg
+asset-squeeze optimize --format webp
 ```
 
 Repeat `--format` to include multiple formats:
@@ -122,6 +129,20 @@ asset-squeeze optimize --verbose
 ```
 
 By default, unchanged files are hidden so the output stays readable. Use `--verbose` to print them too.
+
+### Update The CLI
+
+```bash
+asset-squeeze update
+```
+
+This downloads the latest GitHub release through the official installer, verifies checksums, and replaces the binary in `~/.asset-squeeze/bin`.
+
+To preview the updater command:
+
+```bash
+asset-squeeze update --dry-run
+```
 
 ## Supported Formats
 

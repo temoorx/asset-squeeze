@@ -28,6 +28,9 @@ enum Commands {
 
     /// Check project setup and available optimization backends.
     Doctor(DoctorArgs),
+
+    /// Update asset-squeeze to the latest GitHub release.
+    Update(UpdateArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -74,6 +77,13 @@ struct DoctorArgs {
     /// Project framework. Auto detects Flutter or React Native.
     #[arg(long, value_enum, default_value_t = Framework::Auto)]
     framework: Framework,
+}
+
+#[derive(Parser, Debug)]
+struct UpdateArgs {
+    /// Show the updater command without running it.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -150,6 +160,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Optimize(args) => optimize(args),
         Commands::Doctor(args) => doctor(args),
+        Commands::Update(args) => update(args),
     }
 }
 
@@ -256,7 +267,7 @@ fn doctor(args: DoctorArgs) -> Result<()> {
         None => println!("  jpeg:  missing jpegtran; bundle libjpeg-turbo for releases"),
     }
     println!("  svg:   embedded conservative optimizer");
-    println!("  webp:  not implemented yet");
+    println!("  webp:  embedded RIFF metadata optimizer");
     println!("  gif:   not implemented yet");
 
     println!();
@@ -268,6 +279,72 @@ fn doctor(args: DoctorArgs) -> Result<()> {
     println!("  run: cargo build --release");
 
     Ok(())
+}
+
+fn update(args: UpdateArgs) -> Result<()> {
+    println!("asset-squeeze {}", env!("CARGO_PKG_VERSION"));
+    println!("Updating to the latest GitHub release...");
+
+    let mut command = update_command().context("updates are not supported on this platform yet")?;
+    if args.dry_run {
+        println!("Would run:");
+        println!("  {}", shell_display(&command));
+        return Ok(());
+    }
+
+    let status = command
+        .status()
+        .context("failed to start the asset-squeeze installer")?;
+    if !status.success() {
+        bail!("asset-squeeze update failed with {status}");
+    }
+
+    Ok(())
+}
+
+fn update_command() -> Option<Command> {
+    const INSTALL_SH_URL: &str =
+        "https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.sh";
+    const INSTALL_PS1_URL: &str =
+        "https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.ps1";
+
+    if cfg!(windows) {
+        let mut command = Command::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(format!("irm {INSTALL_PS1_URL} | iex"));
+        Some(command)
+    } else if cfg!(unix) {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("curl -fsSL {INSTALL_SH_URL} | sh"));
+        Some(command)
+    } else {
+        None
+    }
+}
+
+fn shell_display(command: &Command) -> String {
+    let mut parts = Vec::new();
+    parts.push(shell_escape(command.get_program()));
+    parts.extend(command.get_args().map(shell_escape));
+    parts.join(" ")
+}
+
+fn shell_escape(value: &OsStr) -> String {
+    let value = value.to_string_lossy();
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        value.into_owned()
+    } else {
+        format!("'{}'", value.replace('\'', r#"'\''"#))
+    }
 }
 
 fn optimize_asset(asset: &Asset, args: &OptimizeArgs, jpegtran: Option<&Path>) -> OptimizeOutcome {
@@ -1314,6 +1391,20 @@ flutter:
         }
 
         assert!(platform_dir_name().contains('-'));
+    }
+
+    #[test]
+    fn builds_update_command_for_current_platform() {
+        let command = update_command().expect("supported updater platform");
+        let display = shell_display(&command);
+
+        if cfg!(windows) {
+            assert!(display.contains("powershell"));
+            assert!(display.contains("install.ps1"));
+        } else {
+            assert!(display.contains("curl"));
+            assert!(display.contains("install.sh"));
+        }
     }
 
     #[test]
