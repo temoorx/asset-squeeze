@@ -8,6 +8,10 @@ function Get-Platform {
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
     switch ($arch) {
         "X64" { return "windows-x86_64" }
+        "Arm64" {
+            Write-Host "Windows ARM64 detected; installing the Windows x64 build for emulation."
+            return "windows-x86_64"
+        }
         default { throw "Unsupported CPU architecture: $arch" }
     }
 }

@@ -36,7 +36,7 @@ irm https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.ps1 | i
 
 The installer downloads the latest release for your platform, verifies it against `SHA256SUMS`, installs the binary into `~/.asset-squeeze/bin`, and bundles JPEG support so you do not need to install `jpegtran` separately.
 
-Prebuilt archives are published for macOS Apple Silicon, Windows x64, and Linux x64.
+Prebuilt archives are published for macOS Apple Silicon, Windows x64, and Linux x64. On Windows ARM64, the installer uses the Windows x64 build through Windows' x64 emulation.
 
 ## Quick Start
 
