@@ -274,7 +274,7 @@ fn optimize_asset(asset: &Asset, args: &OptimizeArgs, jpegtran: Option<&Path>) -
     match asset.kind {
         AssetKind::Png => optimize_png(&asset.path, args),
         AssetKind::Jpeg => optimize_jpeg(&asset.path, args, jpegtran),
-        AssetKind::Webp => skipped(&asset.path, "WebP backend is not implemented yet"),
+        AssetKind::Webp => optimize_webp(&asset.path, args),
         AssetKind::Svg => optimize_svg(&asset.path, args),
         AssetKind::Gif => skipped(&asset.path, "GIF backend is not implemented yet"),
         AssetKind::Bmp | AssetKind::Wbmp => skipped(
@@ -407,6 +407,151 @@ fn optimize_jpeg(path: &Path, args: &OptimizeArgs, jpegtran: Option<&Path>) -> O
     }
 
     maybe_replace(path, &output.stdout, before, args.dry_run)
+}
+
+fn optimize_webp(path: &Path, args: &OptimizeArgs) -> OptimizeOutcome {
+    let original = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return OptimizeOutcome::Failed {
+                error: err.to_string(),
+            };
+        }
+    };
+
+    let optimized = match optimize_webp_container(&original, &args.strip) {
+        Ok(bytes) => bytes,
+        Err(reason) => return skipped_with_size(original.len() as u64, &reason),
+    };
+
+    maybe_replace(path, &optimized, original.len() as u64, args.dry_run)
+}
+
+fn optimize_webp_container(
+    input: &[u8],
+    strip: &StripPolicy,
+) -> std::result::Result<Vec<u8>, String> {
+    if matches!(strip, StripPolicy::None) {
+        return Ok(input.to_vec());
+    }
+    if input.len() < 12 || &input[0..4] != b"RIFF" || &input[8..12] != b"WEBP" {
+        return Err("invalid WebP RIFF header".to_string());
+    }
+
+    let declared_size = read_u32_le(&input[4..8]) as usize;
+    let declared_end = declared_size
+        .checked_add(8)
+        .ok_or_else(|| "WebP RIFF size overflow".to_string())?;
+    if declared_end > input.len() {
+        return Err("WebP RIFF size exceeds file length".to_string());
+    }
+
+    let mut chunks = Vec::new();
+    let mut cursor = 12;
+    while cursor < declared_end {
+        if cursor + 8 > declared_end {
+            return Err("WebP contains a truncated chunk header".to_string());
+        }
+
+        let fourcc = &input[cursor..cursor + 4];
+        let chunk_size = read_u32_le(&input[cursor + 4..cursor + 8]) as usize;
+        let payload_start = cursor + 8;
+        let payload_end = payload_start
+            .checked_add(chunk_size)
+            .ok_or_else(|| "WebP chunk size overflow".to_string())?;
+        let padded_end = payload_end
+            .checked_add(chunk_size % 2)
+            .ok_or_else(|| "WebP padded chunk size overflow".to_string())?;
+        if padded_end > declared_end {
+            return Err("WebP contains a truncated chunk payload".to_string());
+        }
+
+        chunks.push(WebpChunk {
+            fourcc: [fourcc[0], fourcc[1], fourcc[2], fourcc[3]],
+            bytes: input[cursor..padded_end].to_vec(),
+        });
+        cursor = padded_end;
+    }
+
+    let mut removed_exif = false;
+    let mut removed_xmp = false;
+    let mut removed_iccp = false;
+    let mut kept = Vec::new();
+
+    for chunk in chunks {
+        match &chunk.fourcc {
+            b"EXIF" => removed_exif = true,
+            b"XMP " => removed_xmp = true,
+            b"ICCP" if matches!(strip, StripPolicy::All) => removed_iccp = true,
+            _ => kept.push(chunk),
+        }
+    }
+
+    if !(removed_exif || removed_xmp || removed_iccp || declared_end < input.len()) {
+        return Ok(input.to_vec());
+    }
+
+    for chunk in &mut kept {
+        if &chunk.fourcc == b"VP8X" {
+            update_vp8x_flags(chunk, removed_exif, removed_xmp, removed_iccp)?;
+        }
+    }
+
+    let mut output = Vec::with_capacity(input.len());
+    output.extend_from_slice(b"RIFF");
+    output.extend_from_slice(&[0, 0, 0, 0]);
+    output.extend_from_slice(b"WEBP");
+    for chunk in kept {
+        output.extend_from_slice(&chunk.bytes);
+    }
+
+    let riff_size = output
+        .len()
+        .checked_sub(8)
+        .ok_or_else(|| "WebP output size underflow".to_string())?;
+    if riff_size > u32::MAX as usize {
+        return Err("WebP output is too large".to_string());
+    }
+    output[4..8].copy_from_slice(&(riff_size as u32).to_le_bytes());
+
+    Ok(output)
+}
+
+#[derive(Debug)]
+struct WebpChunk {
+    fourcc: [u8; 4],
+    bytes: Vec<u8>,
+}
+
+fn update_vp8x_flags(
+    chunk: &mut WebpChunk,
+    removed_exif: bool,
+    removed_xmp: bool,
+    removed_iccp: bool,
+) -> std::result::Result<(), String> {
+    if chunk.bytes.len() < 18 {
+        return Err("WebP VP8X chunk is too short".to_string());
+    }
+    let declared_size = read_u32_le(&chunk.bytes[4..8]);
+    if declared_size < 10 {
+        return Err("WebP VP8X payload is too short".to_string());
+    }
+
+    const ICCP_FLAG: u8 = 0b0010_0000;
+    const EXIF_FLAG: u8 = 0b0000_1000;
+    const XMP_FLAG: u8 = 0b0000_0100;
+
+    if removed_iccp {
+        chunk.bytes[8] &= !ICCP_FLAG;
+    }
+    if removed_exif {
+        chunk.bytes[8] &= !EXIF_FLAG;
+    }
+    if removed_xmp {
+        chunk.bytes[8] &= !XMP_FLAG;
+    }
+
+    Ok(())
 }
 
 fn optimize_svg(path: &Path, args: &OptimizeArgs) -> OptimizeOutcome {
@@ -1051,6 +1196,10 @@ fn file_size(path: &Path) -> Result<u64> {
         .len())
 }
 
+fn read_u32_le(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
 fn find_tool(binary: &str) -> Option<PathBuf> {
     find_bundled_tool(binary).or_else(|| find_on_path(binary))
 }
@@ -1193,6 +1342,53 @@ flutter:
     }
 
     #[test]
+    fn strips_safe_webp_metadata_without_touching_image_payload() {
+        let input = fake_webp(&[
+            (b"VP8X", vec![0b0000_1100, 0, 0, 0, 9, 0, 0, 9, 0, 0]),
+            (b"VP8L", vec![1, 2, 3, 4, 5]),
+            (b"EXIF", b"camera".to_vec()),
+            (b"XMP ", b"xmp".to_vec()),
+        ]);
+
+        let output = optimize_webp_container(&input, &StripPolicy::Safe).unwrap();
+
+        assert!(output.len() < input.len());
+        assert_eq!(&output[0..4], b"RIFF");
+        assert_eq!(&output[8..12], b"WEBP");
+        assert!(contains_chunk(&output, b"VP8L"));
+        assert!(!contains_chunk(&output, b"EXIF"));
+        assert!(!contains_chunk(&output, b"XMP "));
+        assert_eq!(
+            chunk_payload(&output, b"VP8L").unwrap(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(chunk_payload(&output, b"VP8X").unwrap()[0] & 0b0000_1100, 0);
+    }
+
+    #[test]
+    fn strip_all_webp_removes_icc_profile() {
+        let input = fake_webp(&[
+            (b"VP8X", vec![0b0010_0000, 0, 0, 0, 9, 0, 0, 9, 0, 0]),
+            (b"ICCP", b"profile".to_vec()),
+            (b"VP8 ", vec![9, 8, 7, 6]),
+        ]);
+
+        let safe_output = optimize_webp_container(&input, &StripPolicy::Safe).unwrap();
+        let all_output = optimize_webp_container(&input, &StripPolicy::All).unwrap();
+
+        assert!(contains_chunk(&safe_output, b"ICCP"));
+        assert!(!contains_chunk(&all_output, b"ICCP"));
+        assert_eq!(
+            chunk_payload(&all_output, b"VP8X").unwrap()[0] & 0b0010_0000,
+            0
+        );
+        assert_eq!(
+            chunk_payload(&all_output, b"VP8 ").unwrap(),
+            vec![9, 8, 7, 6]
+        );
+    }
+
+    #[test]
     fn extracts_react_native_static_asset_refs() {
         let source = r#"
 import logo from "./assets/logo.png";
@@ -1309,5 +1505,45 @@ const hero = require("./assets/hero.jpg");
         assert!(relative.contains("assets/images/icon.png"));
         assert!(relative.contains("assets/images/2.0x/icon.png"));
         assert!(!relative.contains("assets/images/ignored.txt"));
+    }
+
+    fn fake_webp(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(b"WEBP");
+
+        for (fourcc, payload) in chunks {
+            bytes.extend_from_slice(*fourcc);
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                bytes.push(0);
+            }
+        }
+
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        bytes
+    }
+
+    fn contains_chunk(webp: &[u8], fourcc: &[u8; 4]) -> bool {
+        chunk_payload(webp, fourcc).is_some()
+    }
+
+    fn chunk_payload(webp: &[u8], fourcc: &[u8; 4]) -> Option<Vec<u8>> {
+        let declared_end = read_u32_le(&webp[4..8]) as usize + 8;
+        let mut cursor = 12;
+        while cursor + 8 <= declared_end {
+            let candidate = &webp[cursor..cursor + 4];
+            let size = read_u32_le(&webp[cursor + 4..cursor + 8]) as usize;
+            let payload_start = cursor + 8;
+            let payload_end = payload_start + size;
+            if candidate == fourcc {
+                return Some(webp[payload_start..payload_end].to_vec());
+            }
+            cursor = payload_end + size % 2;
+        }
+        None
     }
 }

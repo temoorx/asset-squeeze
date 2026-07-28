@@ -130,7 +130,7 @@ By default, unchanged files are hidden so the output stays readable. Use `--verb
 | PNG/APNG | Supported | Embedded `oxipng` lossless optimizer. |
 | JPEG/JPG | Supported | Uses bundled `jpegtran`, or `jpegtran` from `PATH`. |
 | SVG | Supported | Embedded conservative optimizer. |
-| WebP | Skipped | Planned. |
+| WebP | Supported | Embedded RIFF metadata optimizer. No re-encoding. |
 | GIF | Skipped | Planned, pending a clean licensing/backend choice. |
 | BMP/WBMP | Skipped | Meaningful savings usually require conversion, which is not a default goal. |
 
@@ -149,7 +149,9 @@ asset-squeeze optimize --strip none
 asset-squeeze optimize --strip all
 ```
 
-For JPEG, `--strip all` can remove EXIF/XMP metadata such as camera, edit, and location data. It does not lower visual JPEG quality, but metadata removal may matter for some workflows.
+For JPEG and WebP, `--strip safe` removes EXIF/XMP metadata when supported. `--strip all` may also remove WebP ICC color profiles. These operations do not lower encoded image quality, but metadata and color-profile removal may matter for some workflows.
+
+WebP support is intentionally conservative: `asset-squeeze` edits the WebP RIFF container, removes selected metadata chunks, updates `VP8X` feature flags, and leaves image/animation payload chunks byte-for-byte untouched.
 
 ## SVG Safety
 
