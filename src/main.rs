@@ -945,6 +945,7 @@ flutter:
                 path.strip_prefix(project)
                     .unwrap()
                     .to_string_lossy()
+                    .replace('\\', "/")
                     .to_string()
             })
             .collect::<HashSet<_>>();
