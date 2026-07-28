@@ -35,11 +35,15 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct OptimizeArgs {
+    /// File or folder paths to optimize directly. If omitted, assets are discovered from the project framework.
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+
     /// Project root. Defaults to the current directory.
     #[arg(long, default_value = ".")]
     project: PathBuf,
 
-    /// Project framework. Auto detects Flutter or React Native.
+    /// Project framework. Auto detects Flutter, React Native, or Web.
     #[arg(long, value_enum, default_value_t = Framework::Auto)]
     framework: Framework,
 
@@ -174,7 +178,11 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .project
         .canonicalize()
         .with_context(|| format!("failed to resolve project path {}", args.project.display()))?;
-    let discovered = discover_assets(&project, args.framework)?;
+    let discovered = if args.paths.is_empty() {
+        discover_assets(&project, args.framework)?
+    } else {
+        discover_direct_assets(&project, &args.paths)?
+    };
     let assets = discovered
         .paths
         .into_iter()
@@ -907,6 +915,65 @@ fn discover_assets(project: &Path, framework: Framework) -> Result<AssetDiscover
         }),
         Framework::Auto => unreachable!("auto framework should be resolved before discovery"),
     }
+}
+
+fn discover_direct_assets(project: &Path, inputs: &[PathBuf]) -> Result<AssetDiscovery> {
+    let mut resolved = BTreeSet::new();
+
+    for input in inputs {
+        let path = if input.is_absolute() {
+            input.clone()
+        } else {
+            project.join(input)
+        };
+
+        if !path.exists() {
+            bail!("failed to resolve input path {}", input.display());
+        }
+
+        if path.is_file() {
+            if is_supported_image(&path) {
+                resolved.insert(path.canonicalize().unwrap_or(path));
+            }
+        } else if path.is_dir() {
+            collect_direct_images_under(&path, true, &mut resolved)?;
+        }
+    }
+
+    Ok(AssetDiscovery {
+        framework_name: "direct path",
+        paths: resolved.into_iter().collect(),
+    })
+}
+
+fn collect_direct_images_under(
+    dir: &Path,
+    is_input_root: bool,
+    resolved: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    if !dir.is_dir() || (!is_input_root && should_skip_direct_dir(dir)) {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_direct_images_under(&path, false, resolved)?;
+        } else if path.is_file() && is_supported_image(&path) {
+            resolved.insert(path.canonicalize().unwrap_or(path));
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_direct_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+
+    matches!(name, ".git" | "node_modules" | "target")
 }
 
 fn detect_framework(project: &Path) -> Result<Framework> {
@@ -1915,6 +1982,54 @@ const remote = "https://example.com/remote.png";
         assert!(relative.contains("src/assets/card.jpg"));
         assert!(relative.contains("src/assets/bg.png"));
         assert!(!relative.contains("node_modules/pkg/ignored.png"));
+    }
+
+    #[test]
+    fn resolves_direct_file_and_folder_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().canonicalize().unwrap();
+
+        fs::create_dir_all(project.join("assets/icons/nested")).unwrap();
+        fs::create_dir_all(project.join("assets/node_modules/pkg")).unwrap();
+        fs::write(project.join("assets/logo.png"), b"not a real png").unwrap();
+        fs::write(project.join("assets/icons/home.svg"), b"not a real svg").unwrap();
+        fs::write(
+            project.join("assets/icons/nested/hero.webp"),
+            b"not a real webp",
+        )
+        .unwrap();
+        fs::write(project.join("assets/readme.txt"), b"ignored").unwrap();
+        fs::write(
+            project.join("assets/node_modules/pkg/ignored.jpg"),
+            b"not a real jpg",
+        )
+        .unwrap();
+        fs::write(project.join("splash.jpg"), b"not a real jpg").unwrap();
+
+        let discovered = discover_direct_assets(
+            &project,
+            &[PathBuf::from("assets"), PathBuf::from("splash.jpg")],
+        )
+        .unwrap();
+        let relative = discovered
+            .paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&project)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_string()
+            })
+            .collect::<HashSet<_>>();
+
+        assert_eq!(discovered.framework_name, "direct path");
+        assert!(relative.contains("assets/logo.png"));
+        assert!(relative.contains("assets/icons/home.svg"));
+        assert!(relative.contains("assets/icons/nested/hero.webp"));
+        assert!(relative.contains("splash.jpg"));
+        assert!(!relative.contains("assets/readme.txt"));
+        assert!(!relative.contains("assets/node_modules/pkg/ignored.jpg"));
     }
 
     #[test]

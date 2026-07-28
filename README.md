@@ -50,6 +50,14 @@ asset-squeeze optimize
 
 `--dry-run` previews changes without writing files. The real optimize command replaces files in place only when the optimized file is smaller.
 
+You can also optimize a file or folder directly:
+
+```bash
+asset-squeeze optimize assets/
+asset-squeeze optimize assets/logo.png
+asset-squeeze optimize assets/icons/ assets/splash.webp
+```
+
 To update later:
 
 ```bash
@@ -94,6 +102,20 @@ asset-squeeze optimize --dry-run
 asset-squeeze optimize
 ```
 
+### Optimize A File Or Folder
+
+```bash
+asset-squeeze optimize assets/
+asset-squeeze optimize public/logo.png
+asset-squeeze optimize assets/icons/ assets/hero.webp
+```
+
+When paths are provided, `asset-squeeze` skips framework detection and recursively optimizes supported images inside those files/folders. Relative paths are resolved from the current project root, or from `--project` when provided:
+
+```bash
+asset-squeeze optimize assets/ --project /path/to/app
+```
+
 ### Optimize One Format
 
 ```bash
@@ -107,6 +129,7 @@ Repeat `--format` to include multiple formats:
 
 ```bash
 asset-squeeze optimize --format png --format jpeg
+asset-squeeze optimize assets/ --format svg --format webp
 ```
 
 ### Use A Different Project Path
