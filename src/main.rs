@@ -98,6 +98,7 @@ enum Framework {
     Auto,
     Flutter,
     ReactNative,
+    Web,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -885,6 +886,7 @@ fn discover_assets(project: &Path, framework: Framework) -> Result<AssetDiscover
         Framework::Auto => detect_framework(project)?,
         Framework::Flutter => Framework::Flutter,
         Framework::ReactNative => Framework::ReactNative,
+        Framework::Web => Framework::Web,
     };
 
     match selected {
@@ -899,6 +901,10 @@ fn discover_assets(project: &Path, framework: Framework) -> Result<AssetDiscover
             framework_name: "React Native",
             paths: read_react_native_assets(project)?,
         }),
+        Framework::Web => Ok(AssetDiscovery {
+            framework_name: "Web",
+            paths: read_web_assets(project)?,
+        }),
         Framework::Auto => unreachable!("auto framework should be resolved before discovery"),
     }
 }
@@ -909,14 +915,39 @@ fn detect_framework(project: &Path) -> Result<Framework> {
         return Ok(Framework::Flutter);
     }
 
-    if project.join("package.json").is_file() {
-        return Ok(Framework::ReactNative);
+    let package_json = project.join("package.json");
+    if package_json.is_file() {
+        let manifest = fs::read_to_string(&package_json).unwrap_or_default();
+        if looks_like_react_native_manifest(&manifest) {
+            return Ok(Framework::ReactNative);
+        }
+        return Ok(Framework::Web);
+    }
+
+    if looks_like_web_project(project) {
+        return Ok(Framework::Web);
     }
 
     bail!(
-        "could not detect framework in {}; pass --framework flutter or --framework react-native",
+        "could not detect framework in {}; pass --framework flutter, --framework react-native, or --framework web",
         project.display()
     );
+}
+
+fn looks_like_react_native_manifest(manifest: &str) -> bool {
+    manifest.contains(r#""react-native""#) || manifest.contains(r#""expo""#)
+}
+
+fn looks_like_web_project(project: &Path) -> bool {
+    project.join("index.html").is_file()
+        || project.join("vite.config.js").is_file()
+        || project.join("vite.config.ts").is_file()
+        || project.join("next.config.js").is_file()
+        || project.join("next.config.mjs").is_file()
+        || project.join("next.config.ts").is_file()
+        || project.join("astro.config.mjs").is_file()
+        || project.join("svelte.config.js").is_file()
+        || project.join("angular.json").is_file()
 }
 
 fn read_flutter_assets(pubspec: &Path, project: &Path) -> Result<Vec<PathBuf>> {
@@ -966,6 +997,245 @@ fn read_react_native_assets(project: &Path) -> Result<Vec<PathBuf>> {
     }
 
     Ok(resolved.into_iter().collect())
+}
+
+fn read_web_assets(project: &Path) -> Result<Vec<PathBuf>> {
+    let mut resolved = BTreeSet::new();
+
+    for dir in [
+        "public",
+        "static",
+        "assets",
+        "images",
+        "src/assets",
+        "src/images",
+        "app/assets",
+        "app/images",
+    ] {
+        collect_supported_images_under(&project.join(dir), &mut resolved)?;
+    }
+
+    let mut source_files = Vec::new();
+    collect_web_source_files(project, &mut source_files)?;
+
+    let quoted_re = Regex::new(
+        r#"(?i)["'`]([^"'`]+?\.(?:png|apng|jpe?g|webp|svg|gif|bmp|wbmp)(?:[?#][^"'`]*)?)["'`]"#,
+    )
+    .expect("valid web quoted asset regex");
+    let css_url_re = Regex::new(
+        r#"(?i)url\(\s*["']?([^"')]+?\.(?:png|apng|jpe?g|webp|svg|gif|bmp|wbmp)(?:[?#][^"')\s]*)?)["']?\s*\)"#,
+    )
+    .expect("valid web css url regex");
+
+    for source in source_files {
+        let raw = match fs::read_to_string(&source) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+
+        for asset_ref in extract_web_asset_refs(&raw, &quoted_re, &css_url_re) {
+            resolve_web_asset_ref(project, &source, &asset_ref, &mut resolved);
+        }
+    }
+
+    Ok(resolved.into_iter().collect())
+}
+
+fn collect_supported_images_under(dir: &Path, resolved: &mut BTreeSet<PathBuf>) -> Result<()> {
+    if !dir.is_dir() || should_skip_web_dir(dir) {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_supported_images_under(&path, resolved)?;
+        } else if path.is_file() && is_supported_image(&path) {
+            resolved.insert(path.canonicalize().unwrap_or(path));
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_web_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if should_skip_web_dir(dir) {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_web_source_files(&path, files)?;
+        } else if is_web_source_file(&path) {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_web_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        ".astro"
+            | ".cache"
+            | ".git"
+            | ".next"
+            | ".nuxt"
+            | ".output"
+            | ".svelte-kit"
+            | ".turbo"
+            | "android"
+            | "build"
+            | "coverage"
+            | "dist"
+            | "ios"
+            | "node_modules"
+            | "out"
+            | "target"
+    )
+}
+
+fn is_web_source_file(path: &Path) -> bool {
+    if is_lock_file(path) {
+        return false;
+    }
+
+    if file_size(path).is_ok_and(|size| size > 2 * 1024 * 1024) {
+        return false;
+    }
+
+    matches!(
+        path.extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("html")
+            | Some("htm")
+            | Some("css")
+            | Some("scss")
+            | Some("sass")
+            | Some("less")
+            | Some("js")
+            | Some("jsx")
+            | Some("ts")
+            | Some("tsx")
+            | Some("cjs")
+            | Some("mjs")
+            | Some("vue")
+            | Some("svelte")
+            | Some("astro")
+            | Some("md")
+            | Some("mdx")
+            | Some("json")
+    )
+}
+
+fn is_lock_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lock" | "bun.lockb"
+    )
+}
+
+fn extract_web_asset_refs(source: &str, quoted_re: &Regex, css_url_re: &Regex) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+
+    for captures in quoted_re.captures_iter(source) {
+        if let Some(asset_ref) = captures.get(1).map(|match_| match_.as_str())
+            && let Some(clean) = clean_web_asset_ref(asset_ref)
+        {
+            refs.insert(clean.to_string());
+        }
+    }
+
+    for captures in css_url_re.captures_iter(source) {
+        if let Some(asset_ref) = captures.get(1).map(|match_| match_.as_str())
+            && let Some(clean) = clean_web_asset_ref(asset_ref)
+        {
+            refs.insert(clean.to_string());
+        }
+    }
+
+    refs.into_iter().collect()
+}
+
+fn clean_web_asset_ref(asset_ref: &str) -> Option<&str> {
+    let asset_ref = asset_ref.trim();
+    if asset_ref.is_empty() || is_external_web_ref(asset_ref) {
+        return None;
+    }
+
+    let without_query = asset_ref
+        .find(['?', '#'])
+        .map_or(asset_ref, |index| &asset_ref[..index]);
+    if is_supported_image(Path::new(without_query)) {
+        Some(without_query)
+    } else {
+        None
+    }
+}
+
+fn is_external_web_ref(asset_ref: &str) -> bool {
+    asset_ref.starts_with("http://")
+        || asset_ref.starts_with("https://")
+        || asset_ref.starts_with("//")
+        || asset_ref.starts_with("data:")
+        || asset_ref.starts_with("blob:")
+}
+
+fn resolve_web_asset_ref(
+    project: &Path,
+    source_file: &Path,
+    asset_ref: &str,
+    resolved: &mut BTreeSet<PathBuf>,
+) {
+    let Some(parent) = source_file.parent() else {
+        return;
+    };
+
+    let mut candidates = Vec::new();
+    if let Some(relative) = asset_ref
+        .strip_prefix("./")
+        .or_else(|| asset_ref.strip_prefix("../"))
+    {
+        let prefix = if asset_ref.starts_with("../") {
+            "../"
+        } else {
+            "./"
+        };
+        candidates.push(parent.join(format!("{prefix}{relative}")));
+    } else if let Some(root_relative) = asset_ref.strip_prefix('/') {
+        candidates.push(project.join("public").join(root_relative));
+        candidates.push(project.join(root_relative));
+    } else if let Some(alias_relative) = asset_ref
+        .strip_prefix("@/")
+        .or_else(|| asset_ref.strip_prefix("~/"))
+    {
+        candidates.push(project.join("src").join(alias_relative));
+        candidates.push(project.join(alias_relative));
+    } else {
+        candidates.push(parent.join(asset_ref));
+        candidates.push(project.join("public").join(asset_ref));
+        candidates.push(project.join(asset_ref));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() && is_supported_image(&candidate) {
+            resolved.insert(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
 }
 
 fn collect_react_native_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -1560,6 +1830,90 @@ const hero = require("./assets/hero.jpg");
         assert!(relative.contains("src/assets/logo@2x.png"));
         assert!(relative.contains("src/assets/logo.ios.png"));
         assert!(relative.contains("src/assets/hero.jpg"));
+        assert!(!relative.contains("node_modules/pkg/ignored.png"));
+    }
+
+    #[test]
+    fn detects_package_json_projects_as_react_native_or_web() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+
+        fs::write(
+            project.join("package.json"),
+            r#"{"dependencies":{"vite":"latest","react":"latest"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_framework(project).unwrap(), Framework::Web);
+
+        fs::write(
+            project.join("package.json"),
+            r#"{"dependencies":{"react-native":"latest"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_framework(project).unwrap(), Framework::ReactNative);
+    }
+
+    #[test]
+    fn resolves_web_assets_from_public_folders_and_source_refs() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().canonicalize().unwrap();
+
+        fs::create_dir_all(project.join("public/images")).unwrap();
+        fs::create_dir_all(project.join("src/assets")).unwrap();
+        fs::create_dir_all(project.join("src/styles")).unwrap();
+        fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"devDependencies":{"vite":"latest"}}"#,
+        )
+        .unwrap();
+        fs::write(project.join("public/favicon.png"), b"not a real png").unwrap();
+        fs::write(project.join("public/images/hero.webp"), b"not a real webp").unwrap();
+        fs::write(project.join("src/assets/logo.svg"), b"not a real svg").unwrap();
+        fs::write(project.join("src/assets/card.jpg"), b"not a real jpg").unwrap();
+        fs::write(project.join("src/assets/bg.png"), b"not a real png").unwrap();
+        fs::write(
+            project.join("node_modules/pkg/ignored.png"),
+            b"not a real png",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/App.tsx"),
+            r#"
+import logo from "@/assets/logo.svg";
+const card = new URL("./assets/card.jpg?inline", import.meta.url);
+const remote = "https://example.com/remote.png";
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/styles/app.css"),
+            r#".hero { background-image: url("../assets/bg.png#hash"); }"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("index.html"),
+            r#"<img src="/images/hero.webp" />"#,
+        )
+        .unwrap();
+
+        let assets = read_web_assets(&project).unwrap();
+        let relative = assets
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&project)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_string()
+            })
+            .collect::<HashSet<_>>();
+
+        assert!(relative.contains("public/favicon.png"));
+        assert!(relative.contains("public/images/hero.webp"));
+        assert!(relative.contains("src/assets/logo.svg"));
+        assert!(relative.contains("src/assets/card.jpg"));
+        assert!(relative.contains("src/assets/bg.png"));
         assert!(!relative.contains("node_modules/pkg/ignored.png"));
     }
 

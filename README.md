@@ -1,6 +1,6 @@
 # asset-squeeze
 
-Lossless-first Flutter and React Native asset optimization from one command.
+Lossless-first Flutter, React Native, and web asset optimization from one command.
 
 `asset-squeeze` discovers project image assets, optimizes supported files, and keeps every asset in its original format.
 
@@ -10,7 +10,7 @@ asset-squeeze optimize
 
 ## Why
 
-Mobile projects often accumulate heavy image assets over time. `asset-squeeze` helps reduce app size without rewriting your asset paths, changing formats, or secretly lowering image quality.
+App projects often accumulate heavy image assets over time. `asset-squeeze` helps reduce app size without rewriting your asset paths, changing formats, or secretly lowering image quality.
 
 The core rules:
 
@@ -40,7 +40,7 @@ Prebuilt archives are published for macOS Apple Silicon, Windows x64, and Linux 
 
 ## Quick Start
 
-From your Flutter or React Native project root:
+From your Flutter, React Native, or web project root:
 
 ```bash
 asset-squeeze doctor
@@ -79,6 +79,7 @@ You can force a framework:
 ```bash
 asset-squeeze optimize --framework flutter
 asset-squeeze optimize --framework react-native
+asset-squeeze optimize --framework web
 ```
 
 ### Preview Optimization
@@ -111,7 +112,7 @@ asset-squeeze optimize --format png --format jpeg
 ### Use A Different Project Path
 
 ```bash
-asset-squeeze optimize --project /path/to/mobile_app
+asset-squeeze optimize --project /path/to/app
 ```
 
 ### CI Check
@@ -248,6 +249,48 @@ For safety and predictability, React Native support currently skips:
 
 React Native's own image system requires static image names for bundler resolution, so this matches the asset pattern the bundler can reliably see.
 
+## Web Asset Resolution
+
+`asset-squeeze` supports common web app layouts including Vite, Next.js, React, Vue, Svelte, Astro, and static HTML projects.
+
+It includes image files from common public/source asset folders:
+
+```text
+public/
+static/
+assets/
+images/
+src/assets/
+src/images/
+app/assets/
+app/images/
+```
+
+It also scans HTML, CSS, JavaScript, TypeScript, JSX, TSX, Vue, Svelte, Astro, MD, MDX, and JSON files for local image references:
+
+```tsx
+import logo from "./assets/logo.png";
+const hero = new URL("./assets/hero.webp", import.meta.url);
+```
+
+```css
+.hero {
+  background-image: url("../assets/hero.svg");
+}
+```
+
+```html
+<img src="/logo.png" />
+```
+
+For safety and predictability, web support currently skips:
+
+- `node_modules`
+- build output folders such as `dist`, `build`, `.next`, `.nuxt`, `.svelte-kit`, and `out`
+- lock files
+- files larger than 2 MB while scanning references
+- remote URLs, data URLs, and blob URLs
+
 ## Development
 
 ```bash
@@ -255,6 +298,7 @@ cargo test
 cargo run -- doctor --project /path/to/flutter_app
 cargo run -- optimize --dry-run --project /path/to/flutter_app
 cargo run -- doctor --framework react-native --project /path/to/react_native_app
+cargo run -- doctor --framework web --project /path/to/web_app
 ```
 
 Run all release checks:
