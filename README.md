@@ -1,0 +1,227 @@
+# asset-squeeze
+
+Lossless-first Flutter asset optimization from one command.
+
+`asset-squeeze` reads the assets declared in your Flutter `pubspec.yaml`, optimizes supported image files, and keeps every asset in its original format.
+
+```bash
+asset-squeeze optimize
+```
+
+## Why
+
+Flutter projects often accumulate heavy image assets over time. `asset-squeeze` helps reduce app size without rewriting your asset paths, changing formats, or secretly lowering image quality.
+
+The core rules:
+
+- Same format in, same format out.
+- Lossless-first by default.
+- Replace files only when the optimized result is smaller.
+- Read assets from `pubspec.yaml` instead of blindly walking random folders.
+- Skip risky transformations unless the user explicitly opts in.
+
+## Install
+
+### macOS and Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.sh | sh
+```
+
+### Windows PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.ps1 | iex
+```
+
+The installer downloads the latest release for your platform, verifies it against `SHA256SUMS`, installs the binary into `~/.asset-squeeze/bin`, and bundles JPEG support so you do not need to install `jpegtran` separately.
+
+## Quick Start
+
+From your Flutter project root:
+
+```bash
+asset-squeeze doctor
+asset-squeeze optimize --dry-run
+asset-squeeze optimize
+```
+
+`--dry-run` previews changes without writing files. The real optimize command replaces files in place only when the optimized file is smaller.
+
+## Commands
+
+### Check The Project
+
+```bash
+asset-squeeze doctor
+```
+
+Shows the detected Flutter project, declared image assets, and available optimization backends.
+
+### Preview Optimization
+
+```bash
+asset-squeeze optimize --dry-run
+```
+
+### Optimize Assets
+
+```bash
+asset-squeeze optimize
+```
+
+### Optimize One Format
+
+```bash
+asset-squeeze optimize --format png
+asset-squeeze optimize --format jpeg
+asset-squeeze optimize --format svg
+```
+
+Repeat `--format` to include multiple formats:
+
+```bash
+asset-squeeze optimize --format png --format jpeg
+```
+
+### Use A Different Project Path
+
+```bash
+asset-squeeze optimize --project /path/to/flutter_app
+```
+
+### CI Check
+
+```bash
+asset-squeeze optimize --check
+```
+
+This exits with a non-zero status if any asset can still be optimized.
+
+### Verbose Output
+
+```bash
+asset-squeeze optimize --verbose
+```
+
+By default, unchanged files are hidden so the output stays readable. Use `--verbose` to print them too.
+
+## Supported Formats
+
+| Format | Status | Notes |
+| --- | --- | --- |
+| PNG/APNG | Supported | Embedded `oxipng` lossless optimizer. |
+| JPEG/JPG | Supported | Uses bundled `jpegtran`, or `jpegtran` from `PATH`. |
+| SVG | Supported | Embedded conservative optimizer. |
+| WebP | Skipped | Planned. |
+| GIF | Skipped | Planned, pending a clean licensing/backend choice. |
+| BMP/WBMP | Skipped | Meaningful savings usually require conversion, which is not a default goal. |
+
+## Metadata
+
+Default:
+
+```bash
+asset-squeeze optimize --strip safe
+```
+
+Other options:
+
+```bash
+asset-squeeze optimize --strip none
+asset-squeeze optimize --strip all
+```
+
+For JPEG, `--strip all` can remove EXIF/XMP metadata such as camera, edit, and location data. It does not lower visual JPEG quality, but metadata removal may matter for some workflows.
+
+## SVG Safety
+
+SVG optimization is intentionally conservative. It removes XML comments when metadata stripping is enabled, collapses whitespace between tags, and validates the original and optimized SVG as XML before replacing the file.
+
+To avoid changing rendering semantics, the SVG backend currently skips files containing:
+
+- `script`
+- `style`
+- `text`
+- `tspan`
+- `CDATA`
+- `DOCTYPE`
+- `foreignObject`
+- XML stylesheets
+- `xml:space`
+
+## Flutter Asset Resolution
+
+`asset-squeeze` reads `flutter.assets` from `pubspec.yaml`.
+
+It supports:
+
+```yaml
+flutter:
+  assets:
+    - assets/images/
+    - assets/logo.png
+    - path: assets/flavored/logo.png
+      flavors:
+        - free
+```
+
+It also resolves Flutter image density variants such as:
+
+```text
+assets/icon.png
+assets/2.0x/icon.png
+assets/3.0x/icon.png
+```
+
+## Development
+
+```bash
+cargo test
+cargo run -- doctor --project /path/to/flutter_app
+cargo run -- optimize --dry-run --project /path/to/flutter_app
+```
+
+Run all release checks:
+
+```bash
+scripts/release-check.sh
+```
+
+The script runs formatting, tests, Clippy with warnings denied, a release build, and CLI smoke checks.
+
+## Release
+
+Create and push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions builds release archives for macOS, Linux, and Windows, then publishes them to GitHub Releases.
+
+Release archives are named:
+
+```text
+asset-squeeze-macos-aarch64.tar.gz
+asset-squeeze-macos-x86_64.tar.gz
+asset-squeeze-linux-x86_64.tar.gz
+asset-squeeze-windows-x86_64.zip
+```
+
+Each archive includes:
+
+```text
+asset-squeeze
+vendor/bin/<platform>/jpegtran
+README.md
+LICENSE
+THIRD_PARTY_NOTICES.md
+```
+
+## License
+
+MIT. See `LICENSE`.
+
+When distributing release archives with bundled `jpegtran`, include the libjpeg-turbo notices listed in `THIRD_PARTY_NOTICES.md`.

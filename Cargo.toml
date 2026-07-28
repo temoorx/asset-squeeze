@@ -1,0 +1,17 @@
+[package]
+name = "asset-squeeze"
+version = "0.1.0"
+edition = "2024"
+description = "A lossless-first Flutter asset optimizer that keeps every asset in its original format."
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+oxipng = { version = "10.1", default-features = false, features = ["parallel"] }
+roxmltree = "0.20"
+serde_yaml_ng = "0.10"
+tempfile = "3.14"
+
+[dev-dependencies]
+tempfile = "3.14"
