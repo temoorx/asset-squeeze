@@ -44,7 +44,28 @@ jobs:
       - name: Install jpegtran on Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install jpegtran -y
+        run: |
+          $version = "3.1.4.1"
+          $url = "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/$version/libjpeg-turbo-$version-vc-x64.exe"
+          $installer = Join-Path $env:RUNNER_TEMP "libjpeg-turbo.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
+
+          $candidates = @(
+            "C:\libjpeg-turbo64\bin",
+            "C:\libjpeg-turbo\bin"
+          )
+
+          foreach ($candidate in $candidates) {
+            $jpegtran = Join-Path $candidate "jpegtran.exe"
+            if (Test-Path $jpegtran) {
+              Add-Content -Path $env:GITHUB_PATH -Value $candidate
+              Write-Host "Found jpegtran at $jpegtran"
+              exit 0
+            }
+          }
+
+          throw "jpegtran.exe was not found after installing libjpeg-turbo"
 
       - run: cargo fmt --check
       - run: cargo test
