@@ -35,6 +35,12 @@ need_command curl
 need_command tar
 
 platform="$(detect_platform)"
+if [ "$platform" = "macos-x86_64" ]; then
+  echo "Prebuilt Intel macOS archives are not published yet." >&2
+  echo "Please use an Apple Silicon Mac build, or build from source for now." >&2
+  exit 1
+fi
+
 archive="asset-squeeze-${platform}.tar.gz"
 tmp_dir="$(mktemp -d)"
 

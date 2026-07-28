@@ -36,6 +36,8 @@ irm https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.ps1 | i
 
 The installer downloads the latest release for your platform, verifies it against `SHA256SUMS`, installs the binary into `~/.asset-squeeze/bin`, and bundles JPEG support so you do not need to install `jpegtran` separately.
 
+Prebuilt `v0.1.0` archives are published for macOS Apple Silicon, Windows x64, and Linux x64.
+
 ## Quick Start
 
 From your Flutter project root:
@@ -205,7 +207,6 @@ Release archives are named:
 
 ```text
 asset-squeeze-macos-aarch64.tar.gz
-asset-squeeze-macos-x86_64.tar.gz
 asset-squeeze-linux-x86_64.tar.gz
 asset-squeeze-windows-x86_64.zip
 ```

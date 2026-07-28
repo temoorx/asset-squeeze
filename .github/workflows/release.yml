@@ -20,8 +20,6 @@ jobs:
             os: ubuntu-latest
           - platform: macos-aarch64
             os: macos-14
-          - platform: macos-x86_64
-            os: macos-13
           - platform: windows-x86_64
             os: windows-latest
 
