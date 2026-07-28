@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use oxipng::{Options, StripChunks, optimize_from_memory};
+use regex::Regex;
 use roxmltree::Document;
 use serde_yaml_ng::Value;
 use std::collections::BTreeSet;
@@ -13,7 +14,7 @@ use std::process::{Command, Stdio};
 
 #[derive(Parser, Debug)]
 #[command(name = "asset-squeeze")]
-#[command(about = "Lossless-first Flutter asset optimizer")]
+#[command(about = "Lossless-first Flutter and React Native asset optimizer")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -22,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Optimize assets declared in a Flutter pubspec.yaml.
+    /// Optimize project assets.
     Optimize(OptimizeArgs),
 
     /// Check project setup and available optimization backends.
@@ -31,9 +32,13 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct OptimizeArgs {
-    /// Flutter project root. Defaults to the current directory.
+    /// Project root. Defaults to the current directory.
     #[arg(long, default_value = ".")]
     project: PathBuf,
+
+    /// Project framework. Auto detects Flutter or React Native.
+    #[arg(long, value_enum, default_value_t = Framework::Auto)]
+    framework: Framework,
 
     /// Show what would change without writing files.
     #[arg(long)]
@@ -62,9 +67,13 @@ struct OptimizeArgs {
 
 #[derive(Parser, Debug)]
 struct DoctorArgs {
-    /// Flutter project root. Defaults to the current directory.
+    /// Project root. Defaults to the current directory.
     #[arg(long, default_value = ".")]
     project: PathBuf,
+
+    /// Project framework. Auto detects Flutter or React Native.
+    #[arg(long, value_enum, default_value_t = Framework::Auto)]
+    framework: Framework,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -72,6 +81,13 @@ enum StripPolicy {
     None,
     Safe,
     All,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Framework {
+    Auto,
+    Flutter,
+    ReactNative,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -101,6 +117,12 @@ enum AssetKind {
 struct Asset {
     path: PathBuf,
     kind: AssetKind,
+}
+
+#[derive(Debug)]
+struct AssetDiscovery {
+    framework_name: &'static str,
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -140,9 +162,9 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .project
         .canonicalize()
         .with_context(|| format!("failed to resolve project path {}", args.project.display()))?;
-    let pubspec = project.join("pubspec.yaml");
-    let asset_paths = read_flutter_assets(&pubspec, &project)?;
-    let assets = asset_paths
+    let discovered = discover_assets(&project, args.framework)?;
+    let assets = discovered
+        .paths
         .into_iter()
         .map(|path| Asset {
             kind: classify_asset(&path),
@@ -152,12 +174,19 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .collect::<Vec<_>>();
 
     if assets.is_empty() {
-        println!("No matching declared Flutter image assets found.");
+        println!(
+            "No matching {} image assets found.",
+            discovered.framework_name
+        );
         return Ok(());
     }
 
     let jpegtran = find_tool("jpegtran");
-    println!("Found {} matching declared image asset(s).", assets.len());
+    println!(
+        "Found {} matching {} image asset(s).",
+        assets.len(),
+        discovered.framework_name
+    );
     if assets.iter().any(|asset| asset.kind == AssetKind::Jpeg) {
         match &jpegtran {
             Some(path) => println!("JPEG backend: {}", path.display()),
@@ -201,18 +230,17 @@ fn doctor(args: DoctorArgs) -> Result<()> {
         .project
         .canonicalize()
         .with_context(|| format!("failed to resolve project path {}", args.project.display()))?;
-    let pubspec = project.join("pubspec.yaml");
+    let discovered = discover_assets(&project, args.framework)?;
 
     println!("asset-squeeze {}", env!("CARGO_PKG_VERSION"));
     println!("Project: {}", project.display());
-    println!("pubspec.yaml: {}", pubspec.display());
+    println!("Framework: {}", discovered.framework_name);
 
-    let assets = read_flutter_assets(&pubspec, &project)?;
-    let counts = count_assets_by_kind(&assets);
+    let counts = count_assets_by_kind(&discovered.paths);
 
     println!();
-    println!("Declared image assets");
-    println!("  total: {}", assets.len());
+    println!("Discovered image assets");
+    println!("  total: {}", discovered.paths.len());
     println!("  png:   {}", counts.png);
     println!("  jpeg:  {}", counts.jpeg);
     println!("  svg:   {}", counts.svg);
@@ -630,6 +658,45 @@ fn print_report(report: &Report) {
     println!("  saved:     {}", format_bytes(saved));
 }
 
+fn discover_assets(project: &Path, framework: Framework) -> Result<AssetDiscovery> {
+    let selected = match framework {
+        Framework::Auto => detect_framework(project)?,
+        Framework::Flutter => Framework::Flutter,
+        Framework::ReactNative => Framework::ReactNative,
+    };
+
+    match selected {
+        Framework::Flutter => {
+            let pubspec = project.join("pubspec.yaml");
+            Ok(AssetDiscovery {
+                framework_name: "Flutter",
+                paths: read_flutter_assets(&pubspec, project)?,
+            })
+        }
+        Framework::ReactNative => Ok(AssetDiscovery {
+            framework_name: "React Native",
+            paths: read_react_native_assets(project)?,
+        }),
+        Framework::Auto => unreachable!("auto framework should be resolved before discovery"),
+    }
+}
+
+fn detect_framework(project: &Path) -> Result<Framework> {
+    let pubspec = project.join("pubspec.yaml");
+    if pubspec.is_file() {
+        return Ok(Framework::Flutter);
+    }
+
+    if project.join("package.json").is_file() {
+        return Ok(Framework::ReactNative);
+    }
+
+    bail!(
+        "could not detect framework in {}; pass --framework flutter or --framework react-native",
+        project.display()
+    );
+}
+
 fn read_flutter_assets(pubspec: &Path, project: &Path) -> Result<Vec<PathBuf>> {
     let raw = fs::read_to_string(pubspec)
         .with_context(|| format!("failed to read {}", pubspec.display()))?;
@@ -652,6 +719,211 @@ fn read_flutter_assets(pubspec: &Path, project: &Path) -> Result<Vec<PathBuf>> {
     }
 
     Ok(resolved.into_iter().collect())
+}
+
+fn read_react_native_assets(project: &Path) -> Result<Vec<PathBuf>> {
+    let mut source_files = Vec::new();
+    collect_react_native_source_files(project, &mut source_files)?;
+
+    let require_re =
+        Regex::new(r#"require\s*\(\s*["']([^"']+)["']\s*\)"#).expect("valid require regex");
+    let import_re =
+        Regex::new(r#"(?m)\bimport(?:\s+type)?(?:[\s\w*{},$]+?\s+from\s*)?\s*["']([^"']+)["']"#)
+            .expect("valid import regex");
+
+    let mut resolved = BTreeSet::new();
+    for source in source_files {
+        let raw = match fs::read_to_string(&source) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+
+        for asset_ref in extract_react_native_asset_refs(&raw, &require_re, &import_re) {
+            resolve_react_native_asset_ref(&source, &asset_ref, &mut resolved)?;
+        }
+    }
+
+    Ok(resolved.into_iter().collect())
+}
+
+fn collect_react_native_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if should_skip_react_native_dir(dir) {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_react_native_source_files(&path, files)?;
+        } else if is_react_native_source_file(&path) {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_react_native_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        ".git"
+            | ".expo"
+            | ".next"
+            | ".turbo"
+            | "android"
+            | "build"
+            | "coverage"
+            | "dist"
+            | "ios"
+            | "node_modules"
+            | "target"
+    )
+}
+
+fn is_react_native_source_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("js") | Some("jsx") | Some("ts") | Some("tsx") | Some("cjs") | Some("mjs")
+    )
+}
+
+fn extract_react_native_asset_refs(
+    source: &str,
+    require_re: &Regex,
+    import_re: &Regex,
+) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+
+    for captures in require_re.captures_iter(source) {
+        if let Some(asset_ref) = captures.get(1).map(|match_| match_.as_str())
+            && is_local_asset_ref(asset_ref)
+        {
+            refs.insert(asset_ref.to_string());
+        }
+    }
+
+    for captures in import_re.captures_iter(source) {
+        if let Some(asset_ref) = captures.get(1).map(|match_| match_.as_str())
+            && is_local_asset_ref(asset_ref)
+        {
+            refs.insert(asset_ref.to_string());
+        }
+    }
+
+    refs.into_iter().collect()
+}
+
+fn is_local_asset_ref(asset_ref: &str) -> bool {
+    (asset_ref.starts_with("./") || asset_ref.starts_with("../"))
+        && is_supported_image(Path::new(asset_ref))
+}
+
+fn resolve_react_native_asset_ref(
+    source_file: &Path,
+    asset_ref: &str,
+    resolved: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let Some(parent) = source_file.parent() else {
+        return Ok(());
+    };
+
+    let asset = parent.join(asset_ref);
+    if asset.is_file() && is_supported_image(&asset) {
+        resolved.insert(asset.canonicalize().unwrap_or_else(|_| asset.clone()));
+    }
+
+    resolve_react_native_variants(&asset, resolved)?;
+    Ok(())
+}
+
+fn resolve_react_native_variants(
+    main_asset: &Path,
+    resolved: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let Some(parent) = main_asset.parent() else {
+        return Ok(());
+    };
+    if !parent.is_dir() {
+        return Ok(());
+    }
+    let Some(base_stem) = main_asset.file_stem().and_then(OsStr::to_str) else {
+        return Ok(());
+    };
+    let Some(base_ext) = main_asset.extension().and_then(OsStr::to_str) else {
+        return Ok(());
+    };
+    let normalized_base = normalize_react_native_asset_stem(base_stem);
+    let base_ext = base_ext.to_ascii_lowercase();
+
+    for entry in
+        fs::read_dir(parent).with_context(|| format!("failed to read {}", parent.display()))?
+    {
+        let entry = entry?;
+        let candidate = entry.path();
+        if !candidate.is_file() || !is_supported_image(&candidate) {
+            continue;
+        }
+        let Some(candidate_ext) = candidate.extension().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if candidate_ext.to_ascii_lowercase() != base_ext {
+            continue;
+        }
+        let Some(candidate_stem) = candidate.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if normalize_react_native_asset_stem(candidate_stem) == normalized_base {
+            resolved.insert(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_react_native_asset_stem(stem: &str) -> String {
+    let mut normalized = stem.to_string();
+
+    loop {
+        let mut changed = false;
+
+        if let Some(stripped) = strip_react_native_density_suffix(&normalized) {
+            normalized = stripped;
+            changed = true;
+        }
+
+        for suffix in [".ios", ".android", ".native"] {
+            if let Some(stripped) = normalized.strip_suffix(suffix) {
+                normalized = stripped.to_string();
+                changed = true;
+                break;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    normalized
+}
+
+fn strip_react_native_density_suffix(stem: &str) -> Option<String> {
+    let (base, scale) = stem.rsplit_once('@')?;
+    let number = scale.strip_suffix('x')?;
+
+    if number.parse::<f32>().is_ok_and(|value| value > 0.0) {
+        Some(base.to_string())
+    } else {
+        None
+    }
 }
 
 fn asset_entry_path(entry: &Value) -> Option<&str> {
@@ -918,6 +1190,90 @@ flutter:
         let error = optimize_svg_text(input, &StripPolicy::Safe).unwrap_err();
 
         assert!(error.contains("<text"));
+    }
+
+    #[test]
+    fn extracts_react_native_static_asset_refs() {
+        let source = r#"
+import logo from "./assets/logo.png";
+import "./assets/splash.svg";
+const icon = require('../icons/home@2x.jpg');
+const remote = require('https://example.com/image.png');
+const dynamic = require('./assets/' + name + '.png');
+"#;
+        let require_re =
+            Regex::new(r#"require\s*\(\s*["']([^"']+)["']\s*\)"#).expect("valid require regex");
+        let import_re = Regex::new(
+            r#"(?m)\bimport(?:\s+type)?(?:[\s\w*{},$]+?\s+from\s*)?\s*["']([^"']+)["']"#,
+        )
+        .expect("valid import regex");
+
+        let refs = extract_react_native_asset_refs(source, &require_re, &import_re);
+
+        assert_eq!(
+            refs,
+            vec![
+                "../icons/home@2x.jpg",
+                "./assets/logo.png",
+                "./assets/splash.svg"
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_react_native_variant_stems() {
+        assert_eq!(normalize_react_native_asset_stem("check@2x"), "check");
+        assert_eq!(normalize_react_native_asset_stem("check.ios"), "check");
+        assert_eq!(normalize_react_native_asset_stem("check.ios@3x"), "check");
+        assert_eq!(
+            normalize_react_native_asset_stem("check@3x.android"),
+            "check"
+        );
+    }
+
+    #[test]
+    fn resolves_react_native_assets_and_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().canonicalize().unwrap();
+        fs::create_dir_all(project.join("src/assets")).unwrap();
+        fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        fs::write(
+            project.join("src/App.tsx"),
+            r#"
+import logo from "./assets/logo.png";
+const hero = require("./assets/hero.jpg");
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("node_modules/pkg/index.js"),
+            r#"const ignored = require("./ignored.png");"#,
+        )
+        .unwrap();
+        fs::write(project.join("node_modules/pkg/ignored.png"), b"ignored").unwrap();
+        fs::write(project.join("src/assets/logo.png"), b"not a real png").unwrap();
+        fs::write(project.join("src/assets/logo@2x.png"), b"not a real png").unwrap();
+        fs::write(project.join("src/assets/logo.ios.png"), b"not a real png").unwrap();
+        fs::write(project.join("src/assets/hero.jpg"), b"not a real jpg").unwrap();
+
+        let assets = read_react_native_assets(&project).unwrap();
+        let relative = assets
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&project)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_string()
+            })
+            .collect::<HashSet<_>>();
+
+        assert!(relative.contains("src/assets/logo.png"));
+        assert!(relative.contains("src/assets/logo@2x.png"));
+        assert!(relative.contains("src/assets/logo.ios.png"));
+        assert!(relative.contains("src/assets/hero.jpg"));
+        assert!(!relative.contains("node_modules/pkg/ignored.png"));
     }
 
     #[test]
