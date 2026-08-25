@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 
 #[derive(Parser, Debug)]
 #[command(name = "asset-squeeze")]
-#[command(about = "Lossless-first Flutter and React Native asset optimizer")]
+#[command(about = "Lossless-first app and web asset optimizer")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -59,6 +59,10 @@ struct OptimizeArgs {
     #[arg(long, default_value_t = 2)]
     level: u8,
 
+    /// Lossy JPEG/WebP quality, 1-100. Omit for lossless-only optimization.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
+
     /// Metadata stripping policy.
     #[arg(long, value_enum, default_value_t = StripPolicy::Safe)]
     strip: StripPolicy,
@@ -78,7 +82,7 @@ struct DoctorArgs {
     #[arg(long, default_value = ".")]
     project: PathBuf,
 
-    /// Project framework. Auto detects Flutter or React Native.
+    /// Project framework. Auto detects Flutter, React Native, or Web.
     #[arg(long, value_enum, default_value_t = Framework::Auto)]
     framework: Framework,
 }
@@ -138,6 +142,27 @@ struct Asset {
 struct AssetDiscovery {
     framework_name: &'static str,
     paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default)]
+struct Backends {
+    jpegtran: Option<PathBuf>,
+    cjpeg: Option<PathBuf>,
+    djpeg: Option<PathBuf>,
+    cwebp: Option<PathBuf>,
+    dwebp: Option<PathBuf>,
+}
+
+impl Backends {
+    fn discover() -> Self {
+        Self {
+            jpegtran: find_tool("jpegtran"),
+            cjpeg: find_tool("cjpeg"),
+            djpeg: find_tool("djpeg"),
+            cwebp: find_tool("cwebp"),
+            dwebp: find_tool("dwebp"),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -201,16 +226,39 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         return Ok(());
     }
 
-    let jpegtran = find_tool("jpegtran");
+    let backends = Backends::discover();
     println!(
         "Found {} matching {} image asset(s).",
         assets.len(),
         discovered.framework_name
     );
     if assets.iter().any(|asset| asset.kind == AssetKind::Jpeg) {
-        match &jpegtran {
-            Some(path) => println!("JPEG backend: {}", path.display()),
-            None => println!("JPEG backend: not found"),
+        if args.quality.is_some() {
+            println!(
+                "JPEG lossy backend: {}",
+                backend_pair_label(&backends.djpeg, &backends.cjpeg)
+            );
+        } else {
+            match &backends.jpegtran {
+                Some(path) => println!("JPEG lossless backend: {}", path.display()),
+                None => println!("JPEG lossless backend: not found"),
+            }
+        }
+    }
+    if assets.iter().any(|asset| asset.kind == AssetKind::Webp) && args.quality.is_some() {
+        println!(
+            "WebP lossy backend: {}",
+            backend_pair_label(&backends.dwebp, &backends.cwebp)
+        );
+    }
+    if let Some(quality) = args.quality {
+        println!("Lossy quality: {quality} (JPEG and static WebP only)");
+        println!("Warning: avoid repeatedly applying lossy optimization to the same output.");
+        if assets
+            .iter()
+            .any(|asset| matches!(asset.kind, AssetKind::Png | AssetKind::Svg))
+        {
+            println!("PNG/APNG and SVG assets will remain lossless.");
         }
     }
     if assets.iter().any(|asset| asset.kind == AssetKind::Svg) {
@@ -219,7 +267,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let mut report = Report::default();
 
     for asset in assets {
-        let outcome = optimize_asset(&asset, &args, jpegtran.as_deref());
+        let outcome = optimize_asset(&asset, &args, &backends);
         apply_outcome(
             &asset.path,
             &outcome,
@@ -269,14 +317,23 @@ fn doctor(args: DoctorArgs) -> Result<()> {
     println!("  bmp:   {}", counts.bmp + counts.wbmp);
 
     println!();
+    let backends = Backends::discover();
     println!("Backends");
     println!("  png:   embedded oxipng");
-    match find_tool("jpegtran") {
+    match &backends.jpegtran {
         Some(path) => println!("  jpeg:  {}", path.display()),
         None => println!("  jpeg:  missing jpegtran; bundle libjpeg-turbo for releases"),
     }
+    println!(
+        "  jpeg lossy: {}",
+        backend_pair_label(&backends.djpeg, &backends.cjpeg)
+    );
     println!("  svg:   embedded conservative optimizer");
     println!("  webp:  embedded RIFF metadata optimizer");
+    println!(
+        "  webp lossy: {}",
+        backend_pair_label(&backends.dwebp, &backends.cwebp)
+    );
     println!("  gif:   not implemented yet");
 
     println!();
@@ -356,11 +413,20 @@ fn shell_escape(value: &OsStr) -> String {
     }
 }
 
-fn optimize_asset(asset: &Asset, args: &OptimizeArgs, jpegtran: Option<&Path>) -> OptimizeOutcome {
+fn backend_pair_label(decoder: &Option<PathBuf>, encoder: &Option<PathBuf>) -> String {
+    match (decoder, encoder) {
+        (Some(decoder), Some(encoder)) => {
+            format!("{} + {}", decoder.display(), encoder.display())
+        }
+        _ => "not found".to_string(),
+    }
+}
+
+fn optimize_asset(asset: &Asset, args: &OptimizeArgs, backends: &Backends) -> OptimizeOutcome {
     match asset.kind {
         AssetKind::Png => optimize_png(&asset.path, args),
-        AssetKind::Jpeg => optimize_jpeg(&asset.path, args, jpegtran),
-        AssetKind::Webp => optimize_webp(&asset.path, args),
+        AssetKind::Jpeg => optimize_jpeg(&asset.path, args, backends),
+        AssetKind::Webp => optimize_webp(&asset.path, args, backends),
         AssetKind::Svg => optimize_svg(&asset.path, args),
         AssetKind::Gif => skipped(&asset.path, "GIF backend is not implemented yet"),
         AssetKind::Bmp | AssetKind::Wbmp => skipped(
@@ -445,7 +511,12 @@ fn optimize_png(path: &Path, args: &OptimizeArgs) -> OptimizeOutcome {
     maybe_replace(path, &optimized, original.len() as u64, args.dry_run)
 }
 
-fn optimize_jpeg(path: &Path, args: &OptimizeArgs, jpegtran: Option<&Path>) -> OptimizeOutcome {
+fn optimize_jpeg(path: &Path, args: &OptimizeArgs, backends: &Backends) -> OptimizeOutcome {
+    if let Some(quality) = args.quality {
+        return optimize_jpeg_lossy(path, args, quality, backends);
+    }
+
+    let jpegtran = backends.jpegtran.as_deref();
     let Some(jpegtran) = jpegtran else {
         return skipped(path, "jpegtran not found on PATH");
     };
@@ -495,7 +566,154 @@ fn optimize_jpeg(path: &Path, args: &OptimizeArgs, jpegtran: Option<&Path>) -> O
     maybe_replace(path, &output.stdout, before, args.dry_run)
 }
 
-fn optimize_webp(path: &Path, args: &OptimizeArgs) -> OptimizeOutcome {
+fn optimize_jpeg_lossy(
+    path: &Path,
+    args: &OptimizeArgs,
+    quality: u8,
+    backends: &Backends,
+) -> OptimizeOutcome {
+    let (Some(djpeg), Some(cjpeg)) = (backends.djpeg.as_deref(), backends.cjpeg.as_deref()) else {
+        return skipped(path, "lossy JPEG requires bundled cjpeg and djpeg");
+    };
+
+    let original = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return OptimizeOutcome::Failed {
+                error: err.to_string(),
+            };
+        }
+    };
+    let work = match tempfile::tempdir() {
+        Ok(work) => work,
+        Err(err) => {
+            return OptimizeOutcome::Failed {
+                error: err.to_string(),
+            };
+        }
+    };
+    let decoded = work.path().join("decoded.ppm");
+    let encoded = work.path().join("encoded.jpg");
+
+    if let Err(error) = run_backend(
+        Command::new(djpeg).arg("-outfile").arg(&decoded).arg(path),
+        "djpeg",
+    ) {
+        return OptimizeOutcome::Failed { error };
+    }
+    if let Err(error) = run_backend(
+        Command::new(cjpeg)
+            .arg("-quality")
+            .arg(quality.to_string())
+            .arg("-optimize")
+            .arg("-outfile")
+            .arg(&encoded)
+            .arg(&decoded),
+        "cjpeg",
+    ) {
+        return OptimizeOutcome::Failed { error };
+    }
+
+    let mut optimized = match fs::read(&encoded) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return OptimizeOutcome::Failed {
+                error: err.to_string(),
+            };
+        }
+    };
+    if !matches!(args.strip, StripPolicy::All) {
+        optimized = match copy_jpeg_metadata(&original, &optimized) {
+            Ok(bytes) => bytes,
+            Err(error) => return OptimizeOutcome::Failed { error },
+        };
+    }
+
+    maybe_replace(path, &optimized, original.len() as u64, args.dry_run)
+}
+
+fn copy_jpeg_metadata(original: &[u8], encoded: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    if !encoded.starts_with(&[0xff, 0xd8]) {
+        return Err("cjpeg produced an invalid JPEG".to_string());
+    }
+
+    let segments = jpeg_metadata_segments(original)?;
+    if segments.is_empty() {
+        return Ok(encoded.to_vec());
+    }
+
+    let metadata_len = segments.iter().map(|segment| segment.len()).sum::<usize>();
+    let insert_at = jpeg_metadata_insert_offset(encoded)?;
+    let mut output = Vec::with_capacity(encoded.len() + metadata_len);
+    output.extend_from_slice(&encoded[..insert_at]);
+    for segment in segments {
+        output.extend_from_slice(segment);
+    }
+    output.extend_from_slice(&encoded[insert_at..]);
+    Ok(output)
+}
+
+fn jpeg_metadata_insert_offset(encoded: &[u8]) -> std::result::Result<usize, String> {
+    if encoded.len() < 6 || encoded[2..4] != [0xff, 0xe0] {
+        return Ok(2);
+    }
+
+    let length = u16::from_be_bytes([encoded[4], encoded[5]]) as usize;
+    let end = 4usize
+        .checked_add(length)
+        .ok_or_else(|| "JPEG APP0 segment size overflow".to_string())?;
+    if length < 2 || end > encoded.len() {
+        return Err("invalid JPEG APP0 segment length".to_string());
+    }
+    Ok(end)
+}
+
+fn jpeg_metadata_segments(input: &[u8]) -> std::result::Result<Vec<&[u8]>, String> {
+    if !input.starts_with(&[0xff, 0xd8]) {
+        return Err("invalid JPEG header".to_string());
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = 2;
+    while cursor < input.len() {
+        let start = cursor;
+        if input[cursor] != 0xff {
+            return Err("invalid JPEG marker".to_string());
+        }
+        while cursor < input.len() && input[cursor] == 0xff {
+            cursor += 1;
+        }
+        if cursor >= input.len() {
+            return Err("truncated JPEG marker".to_string());
+        }
+        let marker = input[cursor];
+        cursor += 1;
+        if marker == 0xda || marker == 0xd9 {
+            break;
+        }
+        if matches!(marker, 0x01 | 0xd0..=0xd8) {
+            continue;
+        }
+        if cursor + 2 > input.len() {
+            return Err("truncated JPEG segment length".to_string());
+        }
+        let length = u16::from_be_bytes([input[cursor], input[cursor + 1]]) as usize;
+        if length < 2 || cursor + length > input.len() {
+            return Err("invalid JPEG segment length".to_string());
+        }
+        cursor += length;
+
+        // APP14 contains decoder color-transform instructions and must not be copied
+        // onto newly encoded RGB pixels. APP0 is regenerated by cjpeg.
+        if marker == 0xfe || matches!(marker, 0xe1..=0xed | 0xef) {
+            segments.push(&input[start..cursor]);
+        }
+    }
+
+    Ok(segments)
+}
+
+fn optimize_webp(path: &Path, args: &OptimizeArgs, backends: &Backends) -> OptimizeOutcome {
     let original = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -505,12 +723,127 @@ fn optimize_webp(path: &Path, args: &OptimizeArgs) -> OptimizeOutcome {
         }
     };
 
+    if let Some(quality) = args.quality {
+        return optimize_webp_lossy(path, args, quality, backends, &original);
+    }
+
     let optimized = match optimize_webp_container(&original, &args.strip) {
         Ok(bytes) => bytes,
         Err(reason) => return skipped_with_size(original.len() as u64, &reason),
     };
 
     maybe_replace(path, &optimized, original.len() as u64, args.dry_run)
+}
+
+fn optimize_webp_lossy(
+    path: &Path,
+    args: &OptimizeArgs,
+    quality: u8,
+    backends: &Backends,
+    original: &[u8],
+) -> OptimizeOutcome {
+    if webp_has_animation(original) {
+        return skipped_with_size(
+            original.len() as u64,
+            "animated WebP lossy re-encoding is not supported",
+        );
+    }
+    let (Some(dwebp), Some(cwebp)) = (backends.dwebp.as_deref(), backends.cwebp.as_deref()) else {
+        return skipped_with_size(
+            original.len() as u64,
+            "lossy WebP requires bundled cwebp and dwebp",
+        );
+    };
+    let work = match tempfile::tempdir() {
+        Ok(work) => work,
+        Err(err) => {
+            return OptimizeOutcome::Failed {
+                error: err.to_string(),
+            };
+        }
+    };
+    let decoded = work.path().join("decoded.png");
+    let encoded = work.path().join("encoded.webp");
+
+    if let Err(error) = run_backend(
+        Command::new(dwebp).arg(path).arg("-o").arg(&decoded),
+        "dwebp",
+    ) {
+        return OptimizeOutcome::Failed { error };
+    }
+
+    let metadata = match args.strip {
+        StripPolicy::None => "all",
+        StripPolicy::Safe => "icc",
+        StripPolicy::All => "none",
+    };
+    if let Err(error) = run_backend(
+        Command::new(cwebp)
+            .arg("-quiet")
+            .arg("-q")
+            .arg(quality.to_string())
+            .arg("-m")
+            .arg("6")
+            .arg("-metadata")
+            .arg(metadata)
+            .arg(&decoded)
+            .arg("-o")
+            .arg(&encoded),
+        "cwebp",
+    ) {
+        return OptimizeOutcome::Failed { error };
+    }
+
+    let optimized = match fs::read(&encoded) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return OptimizeOutcome::Failed {
+                error: err.to_string(),
+            };
+        }
+    };
+    maybe_replace(path, &optimized, original.len() as u64, args.dry_run)
+}
+
+fn webp_has_animation(input: &[u8]) -> bool {
+    if input.len() < 12 || &input[0..4] != b"RIFF" || &input[8..12] != b"WEBP" {
+        return false;
+    }
+
+    let mut cursor = 12;
+    while cursor + 8 <= input.len() {
+        let fourcc = &input[cursor..cursor + 4];
+        let size = read_u32_le(&input[cursor + 4..cursor + 8]) as usize;
+        if fourcc == b"ANIM" || fourcc == b"ANMF" {
+            return true;
+        }
+        let Some(next) = cursor.checked_add(8 + size + size % 2) else {
+            return false;
+        };
+        if next > input.len() {
+            return false;
+        }
+        cursor = next;
+    }
+    false
+}
+
+fn run_backend(command: &mut Command, name: &str) -> std::result::Result<(), String> {
+    let output = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|err| format!("failed to start {name}: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("{name} exited with {}", output.status))
+    } else {
+        Err(stderr)
+    }
 }
 
 fn optimize_webp_container(
@@ -1814,6 +2147,45 @@ flutter:
             chunk_payload(&all_output, b"VP8 ").unwrap(),
             vec![9, 8, 7, 6]
         );
+    }
+
+    #[test]
+    fn detects_animated_webp_chunks() {
+        let still = fake_webp(&[(b"VP8 ", vec![1, 2, 3, 4])]);
+        let animated = fake_webp(&[
+            (b"VP8X", vec![0, 0, 0, 0]),
+            (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
+        ]);
+
+        assert!(!webp_has_animation(&still));
+        assert!(webp_has_animation(&animated));
+    }
+
+    #[test]
+    fn copies_jpeg_metadata_but_not_color_transform_markers() {
+        let original = [
+            0xff, 0xd8, // SOI
+            0xff, 0xe1, 0x00, 0x05, b'E', b'X', b'I', // APP1
+            0xff, 0xee, 0x00, 0x05, b'A', b'D', b'B', // APP14
+            0xff, 0xdb, 0x00, 0x04, 0x01, 0x02, // DQT
+            0xff, 0xda, 0x00, 0x02, // SOS
+        ];
+        let encoded = [0xff, 0xd8, 0xff, 0xdb, 0x00, 0x04, 0x03, 0x04, 0xff, 0xd9];
+
+        let output = copy_jpeg_metadata(&original, &encoded).unwrap();
+
+        assert!(output.windows(3).any(|window| window == b"EXI"));
+        assert!(!output.windows(3).any(|window| window == b"ADB"));
+        assert!(output.ends_with(&encoded[2..]));
+    }
+
+    #[test]
+    fn validates_lossy_quality_range() {
+        let valid = Cli::try_parse_from(["asset-squeeze", "optimize", "--quality", "60"]);
+        let invalid = Cli::try_parse_from(["asset-squeeze", "optimize", "--quality", "0"]);
+
+        assert!(valid.is_ok());
+        assert!(invalid.is_err());
     }
 
     #[test]

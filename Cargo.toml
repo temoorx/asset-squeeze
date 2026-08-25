@@ -1,6 +1,6 @@
 [package]
 name = "asset-squeeze"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "A lossless-first Flutter, React Native, and web asset optimizer that keeps every asset in its original format."
 license = "MIT"

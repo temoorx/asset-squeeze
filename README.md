@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.
 irm https://raw.githubusercontent.com/temoorx/asset-squeeze/main/install.ps1 | iex
 ```
 
-The installer downloads the latest release for your platform, verifies it against `SHA256SUMS`, installs the binary into `~/.asset-squeeze/bin`, and bundles JPEG support so you do not need to install `jpegtran` separately.
+The installer downloads the latest release for your platform, verifies it against `SHA256SUMS`, installs the binary into `~/.asset-squeeze/bin`, and bundles the JPEG and WebP tools needed by the CLI. No separate image software is required.
 
 Prebuilt archives are published for macOS Apple Silicon, Windows x64, and Linux x64. On Windows ARM64, the installer uses the Windows x64 build through Windows' x64 emulation.
 
@@ -101,6 +101,22 @@ asset-squeeze optimize --dry-run
 ```bash
 asset-squeeze optimize
 ```
+
+### Choose Lossy Quality
+
+By default, optimization is lossless. Add `--quality` to opt into stronger lossy compression for JPEG and static WebP files while keeping their original formats:
+
+```bash
+asset-squeeze optimize --quality 80
+asset-squeeze optimize --quality 60
+asset-squeeze optimize assets/ --quality 40 --dry-run
+```
+
+`--quality` accepts `1` through `100`. Lower values usually create smaller files with more visible quality loss. The number controls encoder quality, not a guaranteed percentage reduction; the actual saving depends on each image. A practical starting point is `80`, then preview `60` when file size matters more.
+
+PNG/APNG and SVG continue to use lossless optimization when `--quality` is present. Animated WebP is skipped because safely re-encoding its frames requires a separate animation workflow.
+
+Lossy encoding is not perfectly repeatable: re-encoding an already lossy file can introduce additional quality loss. Run the command against source assets under version control, review the dry run first, and avoid repeatedly applying lossy optimization to the same committed output. Files are still replaced only when the result is smaller.
 
 ### Optimize A File Or Folder
 
@@ -173,9 +189,9 @@ asset-squeeze update --dry-run
 | Format | Status | Notes |
 | --- | --- | --- |
 | PNG/APNG | Supported | Embedded `oxipng` lossless optimizer. |
-| JPEG/JPG | Supported | Uses bundled `jpegtran`, or `jpegtran` from `PATH`. |
+| JPEG/JPG | Supported | Lossless by default; bundled `cjpeg`/`djpeg` enable `--quality`. |
 | SVG | Supported | Embedded conservative optimizer. |
-| WebP | Supported | Embedded RIFF metadata optimizer. No re-encoding. |
+| WebP | Supported | Lossless metadata optimization by default; bundled tools provide lossy `--quality` for still images. |
 | GIF | Skipped | Planned, pending a clean licensing/backend choice. |
 | BMP/WBMP | Skipped | Meaningful savings usually require conversion, which is not a default goal. |
 
@@ -194,9 +210,9 @@ asset-squeeze optimize --strip none
 asset-squeeze optimize --strip all
 ```
 
-For JPEG and WebP, `--strip safe` removes EXIF/XMP metadata when supported. `--strip all` may also remove WebP ICC color profiles. These operations do not lower encoded image quality, but metadata and color-profile removal may matter for some workflows.
+For WebP, `--strip safe` removes EXIF/XMP metadata and `--strip all` may also remove ICC color profiles. JPEG metadata is preserved unless `--strip all` is selected. These operations do not lower encoded image quality, but metadata and color-profile removal may matter for some workflows.
 
-WebP support is intentionally conservative: `asset-squeeze` edits the WebP RIFF container, removes selected metadata chunks, updates `VP8X` feature flags, and leaves image/animation payload chunks byte-for-byte untouched.
+Without `--quality`, WebP support is intentionally conservative: `asset-squeeze` edits the WebP RIFF container, removes selected metadata chunks, updates `VP8X` feature flags, and leaves image/animation payload chunks byte-for-byte untouched.
 
 ## SVG Safety
 
