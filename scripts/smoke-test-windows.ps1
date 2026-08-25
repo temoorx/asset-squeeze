@@ -141,6 +141,7 @@ flutter:
     if ($LASTEXITCODE -eq 0) {
         throw "Invalid --quality 0 unexpectedly succeeded"
     }
+    $global:LASTEXITCODE = 0
 
     Write-Host "Windows package smoke test passed"
 }
