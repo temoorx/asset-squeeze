@@ -1134,12 +1134,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let permissions = fs::metadata(path)
+        .with_context(|| format!("failed to read permissions for {}", path.display()))?
+        .permissions();
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
     temp.write_all(bytes)
         .with_context(|| format!("failed to write temp file for {}", path.display()))?;
     temp.flush()
         .with_context(|| format!("failed to flush temp file for {}", path.display()))?;
+    temp.as_file()
+        .set_permissions(permissions)
+        .with_context(|| format!("failed to preserve permissions for {}", path.display()))?;
     temp.persist(path)
         .map_err(|err| err.error)
         .with_context(|| format!("failed to replace {}", path.display()))?;
@@ -2186,6 +2192,25 @@ flutter:
 
         assert!(valid.is_ok());
         assert!(invalid.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("asset.png");
+        fs::write(&path, b"original").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        atomic_write(&path, b"optimized").unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"optimized");
     }
 
     #[test]
