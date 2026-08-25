@@ -1963,18 +1963,35 @@ fn find_bundled_tool(binary: &str) -> Option<PathBuf> {
     let binary_name = platform_binary_name(binary);
     let platform_dir = platform_dir_name();
 
-    let candidates = [
-        exe_dir.join(&binary_name),
-        exe_dir.join("bin").join(&binary_name),
-        exe_dir.join("vendor").join("bin").join(&binary_name),
+    bundled_tool_candidates(exe_dir, &binary_name, &platform_dir)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+fn bundled_tool_candidates(exe_dir: &Path, binary_name: &str, platform_dir: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        exe_dir.join(binary_name),
+        exe_dir.join("bin").join(binary_name),
+        exe_dir.join("vendor").join("bin").join(binary_name),
         exe_dir
             .join("vendor")
             .join("bin")
             .join(platform_dir)
-            .join(&binary_name),
+            .join(binary_name),
     ];
 
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    if let Some(install_root) = exe_dir.parent() {
+        candidates.push(install_root.join("vendor").join("bin").join(binary_name));
+        candidates.push(
+            install_root
+                .join("vendor")
+                .join("bin")
+                .join(platform_dir)
+                .join(binary_name),
+        );
+    }
+
+    candidates
 }
 
 fn platform_binary_name(binary: &str) -> String {
@@ -2067,6 +2084,19 @@ flutter:
         }
 
         assert!(platform_dir_name().contains('-'));
+    }
+
+    #[test]
+    fn searches_release_and_installed_vendor_layouts() {
+        let candidates =
+            bundled_tool_candidates(Path::new("/opt/asset-squeeze/bin"), "cjpeg", "linux-x86_64");
+
+        assert!(candidates.contains(&PathBuf::from(
+            "/opt/asset-squeeze/bin/vendor/bin/linux-x86_64/cjpeg"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            "/opt/asset-squeeze/vendor/bin/linux-x86_64/cjpeg"
+        )));
     }
 
     #[test]
