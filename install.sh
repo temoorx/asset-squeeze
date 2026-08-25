@@ -87,12 +87,17 @@ chmod +x "$BIN_DIR/asset-squeeze"
 rm -rf "$INSTALL_DIR/vendor"
 if [ -d "$tmp_dir/asset-squeeze/vendor" ]; then
   cp -R "$tmp_dir/asset-squeeze/vendor" "$INSTALL_DIR/vendor"
-  find "$INSTALL_DIR/vendor" -type f -name 'jpegtran*' -exec chmod +x {} \;
+  find "$INSTALL_DIR/vendor" -type f \( \
+    -name 'jpegtran' -o -name 'cjpeg' -o -name 'djpeg' -o \
+    -name 'cwebp' -o -name 'dwebp' \
+  \) -exec chmod +x {} \;
 fi
 
-if [ -f "$tmp_dir/asset-squeeze/THIRD_PARTY_NOTICES.md" ]; then
-  cp "$tmp_dir/asset-squeeze/THIRD_PARTY_NOTICES.md" "$INSTALL_DIR/THIRD_PARTY_NOTICES.md"
-fi
+for notice in THIRD_PARTY_NOTICES.md LICENSE-libwebp.txt LICENSE-libjpeg-turbo.md LICENSE-libjpeg-turbo.txt README-libjpeg-ijg.txt; do
+  if [ -f "$tmp_dir/asset-squeeze/$notice" ]; then
+    cp "$tmp_dir/asset-squeeze/$notice" "$INSTALL_DIR/$notice"
+  fi
+done
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) path_ready="yes" ;;
@@ -124,6 +129,6 @@ fi
 
 echo ''
 echo "asset-squeeze installed successfully."
-echo "Try it in a Flutter project:"
+echo "Try it in a supported project or asset folder:"
 echo "  asset-squeeze doctor"
 echo "  asset-squeeze optimize --dry-run"

@@ -58,9 +58,18 @@ try {
         Copy-Item $VendorSource $VendorDest -Recurse -Force
     }
 
-    $Notices = Join-Path $TempDir "asset-squeeze/THIRD_PARTY_NOTICES.md"
-    if (Test-Path $Notices) {
-        Copy-Item $Notices (Join-Path $InstallDir "THIRD_PARTY_NOTICES.md") -Force
+    $NoticeFiles = @(
+        "THIRD_PARTY_NOTICES.md",
+        "LICENSE-libwebp.txt",
+        "LICENSE-libjpeg-turbo.md",
+        "LICENSE-libjpeg-turbo.txt",
+        "README-libjpeg-ijg.txt"
+    )
+    foreach ($NoticeFile in $NoticeFiles) {
+        $NoticePath = Join-Path $TempDir "asset-squeeze/$NoticeFile"
+        if (Test-Path $NoticePath) {
+            Copy-Item $NoticePath (Join-Path $InstallDir $NoticeFile) -Force
+        }
     }
 
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -80,7 +89,7 @@ try {
 
     Write-Host ""
     Write-Host "asset-squeeze installed successfully."
-    Write-Host "Try it in a Flutter project:"
+    Write-Host "Try it in a supported project or asset folder:"
     Write-Host "  asset-squeeze doctor"
     Write-Host "  asset-squeeze optimize --dry-run"
 }
