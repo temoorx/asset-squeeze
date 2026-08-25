@@ -1,0 +1,38 @@
+name: Published Platform Smoke Tests
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+jobs:
+  linux:
+    name: Install and run on Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install published release
+        shell: bash
+        run: |
+          export ASSET_SQUEEZE_INSTALL_DIR="$RUNNER_TEMP/asset-squeeze-install"
+          sh install.sh
+      - name: Run installed package smoke tests
+        shell: bash
+        run: scripts/smoke-test-unix.sh linux-x86_64 "$RUNNER_TEMP/asset-squeeze-install" installed
+
+  windows:
+    name: Install and run on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install published release
+        shell: pwsh
+        run: |
+          $env:ASSET_SQUEEZE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "asset-squeeze-install"
+          ./install.ps1
+      - name: Run installed package smoke tests
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "asset-squeeze-install"
+          ./scripts/smoke-test-windows.ps1 -Root $root -Installed

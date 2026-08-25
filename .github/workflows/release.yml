@@ -103,6 +103,16 @@ jobs:
         shell: bash
         run: scripts/package-release.sh "${{ matrix.platform }}" "${{ github.ref_name }}"
 
+      - name: Smoke test Linux/macOS package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: scripts/smoke-test-unix.sh "${{ matrix.platform }}" dist/asset-squeeze
+
+      - name: Smoke test Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-test-windows.ps1 -Root dist/asset-squeeze
+
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:

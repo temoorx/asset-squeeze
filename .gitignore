@@ -1,7 +1,6 @@
 /target/
-/.DS_Store
+.DS_Store
 *.log
 *.tmp
 dist/
 release/
-
